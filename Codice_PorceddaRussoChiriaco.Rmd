@@ -1,0 +1,1135 @@
+---
+title: "Data Science Lab Project"
+date: "24/5/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(flexCWM)
+```
+
+
+```{r warning=FALSE}
+# Caricamento librerie
+library(dplyr)
+library(tidyverse)
+library(car)
+library(skedastic)
+library(olsrr)
+library(psych)
+library(systemfit)
+library(klaR)
+library(lmtest)
+library(systemfit)
+library(sandwich)
+library(DataCombine)
+library(describedata)
+library(pander)
+library(lubridate)
+library(xts)
+library(forecast)
+library(tis)
+library(imputeTS)
+library(MLmetrics)
+```
+
+```{r}
+# Funzioni per le metriche
+
+# MAE
+mae <- function(pred,real){mean(abs((pred-real)),na.rm=T)}
+
+# RMSE
+rmse <- function(pred,real){sqrt(mean((pred-real)^2,na.rm=T))}
+
+# Funzione per identificare se un giorno è festivo
+create_holiday <- function(date){
+  
+  holiday <- rep(0,length(date))
+  holiday[isEaster(date)] <- 1
+  holiday[which(isEaster(date))+1] <- 1
+  holiday[month(date)==12 & 
+            (day(date)==25 | day(date)==26)] <- 1
+  
+  holiday[month(date)==1 & 
+            (day(date)==1 | day(date)==6)] <- 1
+  
+  holiday[month(date)==8 & day(date)==15 ] <- 1
+  
+  return(holiday)
+}
+```
+
+
+## Caricamento dati
+
+```{r}
+# Dataset ristorante
+df <- read.csv("serie-storiche-ristoranti.csv")
+
+# Dataset colore regioni
+colreg <- read.csv("colreg.csv")
+
+# Dataset meteo piacenza
+piacenza <- read.csv("METEO/meteoPiacenza.csv")
+```
+
+
+
+```{r}
+#Impongo il formato data
+df$data <- as.Date(as.character(df$data), format="%Y%m%d")
+
+#Trasformo gli identificativi dei ristoranti in colonne
+df_w <- df %>%
+  pivot_wider(names_from=id_ristorante,values_from=c(lordototale,scontrini))
+
+#Si considerano le serie da quando si hanno a disposizione dati giornalieri
+df1 <- df_w[df_w$data>=as.Date("2018-09-01"),]
+```
+
+```{r}
+ggplot(df1,aes(x= data,y=lordototale_R003))+
+  geom_line()+
+  theme_minimal()
+```
+
+
+```{r}
+# Suddivisione in pre-covid e post-covid
+data_pre <- df1[df1$data<as.Date("2020-01-01"),]
+data_post <- df1[df1$data>as.Date("2020-06-02"),]
+```
+
+
+
+```{r}
+# Funzione per decomporre la serie storica
+get_decomp <- function(x,date,seasons){
+  y <- msts(x, seasonal.periods=seasons) 
+  y_ts <- msts(y, seasonal.periods = seasons)
+  y_ts_decomp<-mstl(y_ts, s.window = "periodic")
+  trend <- trendcycle(y_ts_decomp)
+  s <- seasonal(y_ts_decomp)
+  innovation <- remainder(y_ts_decomp)
+  return(data.frame(date,trend,s,innovation))
+}
+
+```
+
+
+
+
+```{r}
+
+data_trend <- data.frame(date = data_post$data)
+
+# Calcolo del trend per ogni ristorante
+for(r in c(0:5)){
+  for(v in c("lordototale","scontrini")){
+    
+  decomp <- get_decomp(data_post[,paste0(v,"_R00",r),drop=TRUE],
+                                                  data_post$data,
+                                                  seas=c(7,14))
+
+  data_trend[,paste0(v,"_R00",r)] <- decomp$trend
+  }
+}
+```
+
+
+```{r}
+# Visualizzazione trends
+ggplot(data_trend)+
+  geom_line((aes(date,lordototale_R000,color="R0")))+
+  geom_line((aes(date,lordototale_R001,color="R1")))+
+  geom_line((aes(date,lordototale_R002,color="R2")))+
+  geom_line((aes(date,lordototale_R003,color="R3")))+
+  geom_line((aes(date,lordototale_R004,color="R4")))+
+  geom_line((aes(date,lordototale_R005,color="R5")))+
+  ylim(0,35000)+
+  scale_x_date(date_breaks = "3 month")+
+  ylab("Trend del lordo totale dei 6 ristoranti")+
+  theme_minimal()
+
+```
+
+
+```{r}
+
+# Estrazione dei colori dell'Emilia romagna
+colreg$data <- as.Date(as.character(colreg$data),format = "%Y-%m-%d")
+ercol <- colreg[colreg$denominazione_regione=="Emilia-Romagna",]
+
+
+data_post <- data_post %>%
+  left_join(ercol,by=c("data"="data"))
+
+data_trend <- data_trend %>%
+  left_join(ercol,by=c("date"="data"))
+
+data_trend$denominazione_regione <- NULL
+data_trend$colore[is.na(data_trend$colore)] <- "bianco"
+
+
+
+ggplot(data_trend)+
+  geom_line((aes(date,lordototale_R000,color="R0")))+
+  geom_line((aes(date,lordototale_R001,color="R1")))+
+  geom_line((aes(date,lordototale_R002,color="R2")))+
+  geom_line((aes(date,lordototale_R003,color="R3")))+
+  geom_line((aes(date,lordototale_R004,color="R4")))+
+  geom_line((aes(date,lordototale_R005,color="R5")))+
+  geom_vline(xintercept = as.Date("2020-11-06"),col="yellow")+
+  geom_vline(xintercept = as.Date("2020-11-15"),col="orange")+
+  geom_vline(xintercept = as.Date("2020-12-06"),col="yellow")+
+  geom_vline(xintercept = as.Date("2020-12-24"),col="red")+
+  geom_vline(xintercept = as.Date("2020-12-28"),col="orange")+
+  geom_vline(xintercept = as.Date("2020-12-31"),col="red")+
+  geom_vline(xintercept = as.Date("2021-01-07"),col="yellow")+
+  geom_vline(xintercept = as.Date("2021-01-09"),col="orange")+
+  geom_vline(xintercept = as.Date("2021-02-01"),col="yellow")+
+  geom_vline(xintercept = as.Date("2021-02-21"),col="orange")+
+  geom_vline(xintercept = as.Date("2021-03-15"),col="red")+
+  geom_vline(xintercept = as.Date("2021-04-12"),col="orange")+
+  geom_vline(xintercept = as.Date("2021-04-26"),col="yellow")+
+  geom_vline(xintercept = as.Date("2021-06-14"),col="black")+
+  geom_vline(xintercept = as.Date("2022-01-10"),col="yellow")+
+  geom_vline(xintercept = as.Date("2022-03-14"),col="black")+
+  ylim(0,35000)+
+  scale_x_date(date_breaks = "3 month")+
+  ylab("Trend del lordo totale dei 6 ristoranti")+
+  theme_minimal()
+
+
+```
+
+
+```{r}
+df_r3 <- data.frame(data=df1$data,
+                  lordo3=df1$lordototale_R003,
+                  scontrini3=df1$scontrini_R003)
+```
+
+
+## Estrazione dati rilevanti dai dataset del meteo
+```{r}
+#Formato data
+piacenza$DATA <- as.Date(piacenza$DATA, format="%Y-%m-%d")
+
+#Tmedia in Fahrenheit
+piacenza$TF <- piacenza$TMEDIA*(9/5) + 32
+piacenza$RH <- piacenza$UMIDITA
+
+#HeatIndex
+piacenza$HI <- -42.379 + 2.04901523*piacenza$TF + 10.14333127*piacenza$RH - 0.22475541*piacenza$TF*piacenza$RH - 0.00683783*piacenza$TF^2 - 0.05481717*piacenza$RH^2 + 0.00122874*piacenza$TF^2*piacenza$RH + 0.00085282*piacenza$TF*piacenza$RH^2 - 0.00000199*piacenza$TF^2*piacenza$RH^2
+
+
+# Raggruppamento dei varie categorie metereologiche
+piacenza$nebbia <- 0
+piacenza$nebbia[piacenza$FENOMENI=="pioggia nebbia " |
+                  piacenza$FENOMENI=="pioggia neve nebbia " |
+                  piacenza$FENOMENI=="neve nebbia " |
+                  piacenza$FENOMENI=="pioggia temporale nebbia " |
+                  piacenza$FENOMENI=="nebbia "] <- 1
+
+piacenza$pioggia <- 0
+piacenza$pioggia[piacenza$FENOMENI=="pioggia " |
+                   piacenza$FENOMENI=="pioggia nebbia " |
+                   piacenza$FENOMENI=="pioggia neve " |
+                   piacenza$FENOMENI=="pioggia neve nebbia " |
+                   piacenza$FENOMENI=="pioggia temporale " |
+                   piacenza$FENOMENI=="pioggia temporale nebbia "] <- 1
+
+piacenza$neve <- 0
+piacenza$neve[piacenza$FENOMENI=="neve " |
+                   piacenza$FENOMENI=="neve nebbia " |
+                   piacenza$FENOMENI=="pioggia neve nebbia " |
+                   piacenza$FENOMENI=="pioggia neve " ] <- 1
+
+piacenza$temporale <- 0
+piacenza$temporale[piacenza$FENOMENI=="pioggia temporale " |
+                   piacenza$FENOMENI=="pioggia temporale nebbia "] <- 1
+
+piacenza2 <- subset(piacenza, select=c(DATA,HI,TF,RH,nebbia,pioggia,neve,temporale))
+```
+
+## Colore regioni
+```{r}
+
+colreg_w <- colreg %>%
+  pivot_wider(names_from=denominazione_regione,values_from=colore)
+
+colreg_w <- colreg_w[,c(1,6)]
+
+names(colreg_w)[2] <- "colore"
+
+#Formato data
+colreg_w$data <- as.Date(colreg_w$data, format="%Y-%m-%d")
+```
+
+##Join dati
+```{r}
+all <- df_r3 %>%
+          left_join(piacenza2,by=c("data"="DATA"))
+
+all <- all %>%
+          left_join(colreg_w,by=c("data"="data"))
+
+all$colore[is.na(all$colore)] <- "bianco"
+all$colore <- as.factor(all$colore)
+```
+
+
+## Pulizia
+```{r}
+# Se il lordo è 0  è posto ad NA
+all$lordo3[(all$lordo3==0)] <- NA
+
+# Se il lordo totale è NA viene posto ad NA anche il numero di scontrini
+all$scontrini3[is.na(all$lordo3)] <- NA
+```
+
+
+
+
+## Aggiunta weekend
+```{r}
+all$giorno <- wday(all$data, week_start=1)
+all$weekend <- 0
+all$weekend[all$giorno==5 | all$giorno==6 | all$giorno==7] <- 1
+all$weekend <- as.factor(all$weekend)
+
+```
+
+```{r}
+data_pre <- all[all$data<as.Date("2020-01-01"),]
+data_post <- all[all$data>as.Date("2020-06-02")& all$data<as.Date("2022-04-29"),]
+```
+
+
+```{r}
+
+data_pre$holiday <- create_holiday(data_pre$data)
+
+data_pre$lordo3 <- na_kalman(data_pre$lordo3, model = "auto.arima")
+data_pre$scontrini3 <- na_kalman(data_pre$scontrini3, model = "auto.arima")
+data_pre_we <- data_pre[data_pre$weekend==1 | data_pre$holiday==1,]
+data_pre_w <- data_pre[data_pre$weekend==0 & data_pre$holiday==0,]
+```
+
+
+```{r}
+data_pre_w$week <- week(data_pre_w$data)
+data_pre_w$year <- year(data_pre_w$data)
+
+data_pre_we$week <- week(data_pre_we$data)
+data_pre_we$year <- year(data_pre_we$data)
+```
+
+```{r}
+data_pre_w_sett <- data_pre_w %>%
+                      group_by(week,year)%>%
+                      summarise(lordo3 = mean(lordo3))%>%
+                      arrange(year,week)
+
+data_pre_we_sett <- data_pre_we %>%
+                      group_by(week,year)%>%
+                      summarise(lordo3 = mean(lordo3))%>%
+                      arrange(year,week)
+
+data_pre_w_sett$week_year <- paste0(data_pre_w_sett$week,"-",data_pre_w_sett$year)
+data_pre_w_sett$x <- c(1:nrow(data_pre_w_sett))
+data_pre_we_sett$week_year <- paste0(data_pre_we_sett$week,"-",data_pre_we_sett$year)
+data_pre_we_sett$x <- c(1:nrow(data_pre_we_sett))
+```
+
+```{r}
+
+ggplot(data=data_pre_w_sett,aes(x=x,y=lordo3))+
+  geom_line(color="blue")+
+  geom_line(data=data_pre_we_sett,aes(x=x,y=lordo3),color="red")+
+  scale_x_continuous(breaks = seq(1,100,15))+
+  theme_minimal()
+```
+
+```{r}
+
+ggplot(data=data_pre_w_sett,aes(x=x,y=scontrini3))+
+  geom_line(color="blue")+
+  geom_line(data=data_pre_we_sett,aes(x=x,y=scontrini3),color="red")+
+  scale_x_continuous(breaks = seq(1,100,15))+
+  theme_minimal()
+```
+
+
+```{r}
+data_post$holiday <- create_holiday(data_post$data)
+
+data_post$lordo3 <- na_kalman(data_post$lordo3, model = "auto.arima")
+data_post$scontrini3 <- na_kalman(data_post$scontrini3, model = "auto.arima")
+
+data_post_we <- data_post[data_post$weekend==1 | data_post$holiday==1,]
+data_post_w <- data_post[data_post$weekend==0 & data_post$holiday==0,]
+```
+
+
+```{r}
+data_post_w$week <- week(data_post_w$data)
+data_post_w$year <- year(data_post_w$data)
+
+data_post_we$week <- week(data_post_we$data)
+data_post_we$year <- year(data_post_we$data)
+```
+
+```{r}
+data_post_w_sett <- data_post_w %>%
+                      group_by(week,year)%>%
+                      summarise(lordo3 = mean(lordo3))%>%
+                      arrange(year,week)
+
+data_post_we_sett <- data_post_we %>%
+                      group_by(week,year)%>%
+                      summarise(lordo3 = mean(lordo3))%>%
+                      arrange(year,week)
+
+data_post_w_sett$week_year <- paste0(data_post_w_sett$week,"-",data_post_w_sett$year)
+data_post_w_sett$x <- c(1:nrow(data_post_w_sett))
+data_post_we_sett$week_year <- paste0(data_post_we_sett$week,"-",data_post_we_sett$year)
+data_post_we_sett$x <- c(1:nrow(data_post_we_sett))
+```
+
+
+```{r}
+
+ggplot(data=data_post_w_sett,aes(x=x,y=lordo3))+
+  geom_line(color="blue")+
+  geom_line(data=data_post_we_sett,aes(x=x,y=lordo3),color="red")+
+  scale_x_continuous(breaks = seq(1,100,15))+
+  theme_minimal()
+
+
+```
+
+
+
+
+
+# Previsioni giornaliere 
+
+## Previsione con stagionalità settimane con Fourier
+
+
+```{r}
+
+# Finestra di previsione
+h <- 126
+
+# Suddivisione in train/test
+data_post_train <- data_post[0:(nrow(data_post)-h),]
+data_post_test <- data_post[(nrow(data_post)-h+1):nrow(data_post),]
+
+
+y_train <- ts(data_post_train$lordo3,frequency = 7)
+
+# Calcolo dei termini di fourier
+f_train  <- fourier(ts(y_train,frequency = 7),K=3)
+holiday_train <- create_holiday(data_post_train$data)
+
+# Stima
+fit <- auto.arima(y_train, 
+                  xreg=cbind(f_train,holiday_train), 
+                  seasonal=FALSE)
+```
+
+
+
+```{r}
+# Forecast a h giorni
+set.seed(1)
+y_test <- ts(data_post_test$lordo3,start=c(82,3),frequency = 7)
+y_test[y_test==0] <- NA
+y_test <- na_kalman(y_test,model = "auto.arima")
+
+# Termini di fourier e holiday per il test set
+f_test  <- fourier(ts(y_test,frequency = 7),K=3)
+holiday_test <- create_holiday(data_post_test$data)
+
+# Previsione
+fc <- forecast(fit, xreg=cbind(f_test,holiday_test))
+
+# Plot
+fc %>% autoplot()
+```
+
+```{r}
+# Calcolo metriche
+accuracy(fc,y_test)
+```
+
+## Previsioni senza stagionalità
+
+```{r}
+
+fit_noseas <- auto.arima(y_train, 
+                  xreg=cbind(holiday_train), 
+                  seasonal=FALSE)
+```
+
+
+```{r}
+##FORECAST a h giorni senza stagionalità
+
+fc_noseas <- forecast(fit_noseas, xreg=cbind(holiday_test))
+
+fc_noseas %>% autoplot()
+```
+
+```{r}
+accuracy(fc_noseas,y_test)
+```
+
+
+# SARIMA (stagionalità)
+
+```{r}
+
+fitseas <- auto.arima(y_train, 
+                  xreg=cbind(holiday_train), 
+                  seasonal=TRUE)
+```
+
+```{r}
+fcseas <- forecast(fitseas, xreg=cbind(holiday_test))
+
+fcseas %>% autoplot()
+```
+
+```{r}
+# Risultati sul test set
+accuracy(fcseas, y_test)
+```
+
+# Previsioni con le altre covariate
+```{r}
+# Matrice delle covariate utilizzate
+xreg <- cbind(data_post$HI, 
+             data_post$giallo,
+             data_post$arancione,
+             data_post$rosso,
+             data_post$nebbia)
+```
+
+
+```{r}
+# Train set covariate
+xreg_train <- cbind(data_post_train$HI, 
+                   data_post_train$giallo, 
+                   data_post_train$arancione,
+                   data_post_train$rosso, 
+                   data_post_train$nebbia)
+
+# Modello SARIMA
+fitseascov <- Arima(y_train, order=c(2,0,1),seasonal=c(0,1,1), 
+                  xreg=xreg_train)
+```
+
+
+```{r}
+# Test set covariate
+xreg_test <- cbind(data_post_test$HI, 
+                   data_post_test$giallo, 
+                   data_post_test$arancione,
+                   data_post_test$rosso, 
+                   data_post_test$nebbia)
+
+# Previsioni
+fcseascov <- forecast(fitseascov,
+                      xreg=xreg_test)
+
+fcseascov %>% autoplot()
+```
+
+
+```{r}
+# Risultati sul test set
+accuracy(fcseascov, y_test)
+```
+
+
+# Previsioni utilizzando la time series Cross-validation
+
+```{r}
+set.seed(1)
+
+# Funzione per ottenere le previsioni 
+
+arma_cv <- function(y, h, xreg) {
+  ncol <- ncol(xreg)
+  X <- matrix(xreg[seq_along(y), ], ncol = ncol)
+  if (nrow(xreg) < length(y) + h) {
+    stop("Variabili esplicative non sufficienti")
+  }
+  newX <- matrix(xreg[length(y) + seq(h), ], ncol = ncol)
+  fit <- Arima(y,
+               order=c(2,0,1),
+               seasonal=list(order=c(0,1,1),period=7),
+               xreg = X)
+  
+  
+  
+  forecast(fit, xreg = newX, h = h)
+}
+
+```
+
+
+
+## Previsioni 7-step ahead
+
+```{r}
+# Giorni di previsione per ogni iterazione
+p <- 7
+
+# Numero di iterazioni
+k <- h/p
+
+# Vettore di previsioni
+pred_7d <- c()
+
+y <- ts(data_post$lordo3,frequency = 7)
+
+```
+
+
+
+```{r}
+# Calcolo delle k previsioni di 7 giorni
+for(i in k:1){
+  pred_7d <-c(pred_7d,arma_cv(y[c(((k-i)*p):(length(y)-p*i))],h=p,xreg=xreg[c(((k-i)*p):(nrow(xreg)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+```{r}
+# Confronto tra previsioni e real data
+metrics <- c(rmse(y_test,pred_7d),mae(y_test,pred_7d),MAPE(pred_7d,y_test)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+# Previsioni 1-step ahead
+
+```{r}
+# Finestra di previsione
+p <- 1
+
+# Numero di iterazioni
+k <- h/p
+
+# Vettore di previsioni
+pred_1d <- c()
+```
+
+
+```{r}
+for(i in k:1){
+  pred_1d <-c(pred_1d,arma_cv(y[c(((k-i)*p):(length(y)-p*i))],h=p,xreg=xreg[c(((k-i)*p):(nrow(xreg)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+```{r}
+metrics <- c(rmse(y_test,pred_1d),mae(y_test,pred_1d),MAPE(pred_1d,y_test)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+
+# Previsioni 14-steps ahead
+```{r}
+# Finestra di previsione
+p <- 14
+
+# Numero di iterazioni
+k <- h/p
+
+# Vettore di previsioni
+pred_14d <- c()
+```
+
+
+```{r}
+for(i in k:1){
+  pred_14d <-c(pred_14d,arma_cv(y[c(((k-i)*p):(length(y)-p*i))],h=p,xreg=xreg[c(((k-i)*p):(nrow(xreg)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+```{r}
+metrics <- c(rmse(y_test,pred_14d),mae(y_test,pred_14d),MAPE(pred_14d,y_test)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+
+## Suddivisione delle serie storiche in giorni feriali e festivi
+```{r}
+# Calcolo dei giorni di vacanza
+data_post$holiday <- create_holiday(data_post$data)
+
+# One hot encoding dei colori
+data_post$giallo <- 0
+data_post$giallo[data_post$colore=="giallo"] <- 1
+data_post$arancione <- 0
+data_post$arancione[data_post$colore=="arancione"] <- 1
+data_post$rosso <- 0
+data_post$rosso[data_post$colore=="rosso"] <- 1
+
+# Calcolo settimana dell'anno e anno
+data_post$week <- isoweek(data_post$data)
+data_post$year <- year(data_post$data)
+
+# Dataset composto dai giorni feriali
+feriali_post <- data_post[(data_post$weekend == 0 & data_post$holiday == 0) ,]
+
+# Dataset composto dai giorni festivi
+fest_post <- data_post[(data_post$weekend==1 | data_post$holiday == 1),]
+
+mode_st <- function(v) {
+   tab <- table(v)
+   return(names(tab)[which.max(tab)])
+}
+
+
+# Raggruppamento per settimana e anno
+feriali_post_g <- feriali_post %>%
+                    group_by(week,year) %>%
+                    summarise(data = min(data),
+                              lordo3 = mean(lordo3,na.rm = TRUE),
+                              scontrini3 = mean(scontrini3,na.rm = TRUE),
+                              HI = mean(HI,na.rm=TRUE),
+                              nebbia =  mode_st(nebbia),
+                              pioggia = mode_st(pioggia),
+                              neve = mode_st(neve),
+                              temporale = mode_st(temporale),
+                              giallo = mode_st(giallo),
+                              arancione = mode_st(arancione),
+                              rosso = mode_st(rosso)
+                              ) %>%
+                    arrange(data)
+
+feriali_post_g <- feriali_post_g %>%
+                    mutate(nebbia=as.factor(nebbia),
+                           pioggia = as.factor(pioggia),
+                           neve = as.factor(neve),
+                           temporale = as.factor(temporale),
+                           giallo = as.factor(giallo),
+                           arancione = as.factor(arancione), 
+                           rosso = as.factor(rosso))
+
+feriali_post_g <- na.omit(feriali_post_g)
+
+
+fest_post_g <- fest_post %>%
+                    group_by(week,year) %>%
+                    summarise(data = min(data),
+                              lordo3 = mean(lordo3,na.rm = TRUE),
+                              scontrini3 = mean(scontrini3,na.rm = TRUE),
+                              HI = mean(HI,na.rm=TRUE),
+                              nebbia = mode_st(nebbia),
+                              pioggia = mode_st(pioggia),
+                              neve = mode_st(neve),
+                              temporale = mode_st(temporale),
+                              giallo = mode_st(giallo),
+                              arancione = mode_st(arancione),
+                              rosso = mode_st(rosso)
+                              ) %>%
+                    arrange(data)
+
+fest_post_g <- fest_post_g %>%
+                    mutate(nebbia=as.factor(nebbia),
+                           pioggia = as.factor(pioggia),
+                           neve = as.factor(neve),
+                           temporale = as.factor(temporale),
+                           giallo = as.factor(giallo),
+                           arancione = as.factor(arancione), 
+                           rosso = as.factor(rosso))
+
+fest_post_g <- na.omit(fest_post_g)
+```
+
+
+
+
+#Si procede con le previsioni
+```{r}
+mod3 <- lm(lordo3 ~ HI + pioggia +nebbia + temporale + giallo + arancione + rosso , data=feriali_post_g)
+
+summary(mod3)
+```
+
+```{r}
+pacf(mod3$residuals)
+```
+
+```{r}
+# Finestra di previsione (28 settimane)
+h <- 28
+
+# Suddivisione in train/test set
+feriali_post_train <- feriali_post_g[0:(nrow(feriali_post_g)-h),]
+feriali_post_test <- feriali_post_g[(nrow(feriali_post_g)-h+1):nrow(feriali_post_g),]
+
+# Trasformazione in ts
+y_train_fer <- ts(feriali_post_train$lordo3)
+
+# Variabili esplicative utilizzate
+xreg_train_fer <- cbind(feriali_post_train$HI, 
+                        feriali_post_train$giallo,
+                        feriali_post_train$arancione,
+                        feriali_post_train$rosso,
+                        feriali_post_train$temporale)
+
+# Modello arima non stagionale con regressori
+fitseascov_fer <- auto.arima(y_train_fer, 
+                  xreg=xreg_train_fer, seasonal = FALSE,allowdrift = FALSE)
+```
+
+
+
+```{r}
+# Previsione a 28 settimane
+
+# X test
+xreg_test_fer <- cbind(feriali_post_test$HI, 
+                       feriali_post_test$giallo,
+                       feriali_post_test$arancione,
+                       feriali_post_test$rosso,
+                       feriali_post_test$temporale)
+
+# Y test
+y_test_fer <- ts(feriali_post_test$lordo3,start=73)
+
+# Previsioni
+fcseascov_fer <- forecast(fitseascov_fer, xreg=xreg_test_fer)
+
+fcseascov_fer %>% autoplot()
+```
+
+
+
+```{r}
+accuracy(fcseascov_fer, y_test_fer)
+```
+
+
+```{r}
+# Prevsione nei giorni festivi
+fest_post_train <- fest_post_g[0:(nrow(fest_post_g)-h),]
+fest_post_test <- fest_post_g[(nrow(fest_post_g)-h+1):nrow(fest_post_g),]
+
+y_train_fest <- ts(fest_post_train$lordo3)
+
+
+xreg_train_fest <- cbind(fest_post_train$HI, 
+                         fest_post_train$giallo,
+                         fest_post_train$arancione,
+                         fest_post_train$rosso,
+                         fest_post_train$temporale)
+
+fitseascov_fest <- auto.arima(y_train_fest,
+                  xreg=xreg_train_fest,seasonal=FALSE,allowdrift = FALSE)
+```
+
+
+
+```{r}
+
+xreg_test_fest <- cbind(fest_post_test$HI, 
+                        fest_post_test$giallo,
+                        fest_post_test$arancione,
+                        fest_post_test$rosso,
+                        fest_post_test$temporale)
+
+y_test_fest <- ts(fest_post_test$lordo3,start=73)
+
+fcseascov_fest <- forecast(fitseascov_fest, xreg=xreg_test_fest)
+fcseascov_fest %>% autoplot()
+```
+```{r}
+fcseascov_fest
+```
+
+```{r}
+accuracy(fcseascov_fest, y_test_fest)
+```
+
+
+# Cross-validation Feriali
+
+```{r}
+set.seed(1)
+
+arma_cv_sett <- function(y, h, xreg) {
+  ncol <- ncol(xreg)
+  X <- matrix(xreg[seq_along(y), ], ncol = ncol)
+  if (nrow(xreg) < length(y) + h) {
+     stop("Variabili esplicative non sufficienti")
+  }
+  newX <- matrix(xreg[length(y) + seq(h), ], ncol = ncol)
+  fit <- Arima(y,
+               order=c(0,1,1),
+               xreg = X,include.drift = TRUE)
+  
+  
+  forecast(fit, xreg = newX, h = h)
+}
+
+```
+
+
+
+
+
+## Mensile
+
+```{r}
+p <- 4
+k <- h/p
+
+pred_4w_fer <- c()
+
+y_fer <- ts(feriali_post_g$lordo3)
+
+xreg_fer <- cbind(feriali_post_g$HI, 
+                  feriali_post_g$giallo,
+                  feriali_post_g$arancione,
+                  feriali_post_g$rosso)
+```
+
+
+
+
+```{r}
+
+for(i in k:1){
+  pred_4w_fer <-c(pred_4w_fer,arma_cv_sett(y_fer[c(((k-i)*p):(length(y_fer)-p*i))],h=p,xreg=xreg_fer[c(((k-i)*p):(nrow(xreg_fer)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+
+
+
+```{r}
+metrics <- c(rmse(y_test_fer,pred_4w_fer),mae(y_test_fer,pred_4w_fer),MAPE(pred_4w_fer,y_test_fer)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+# Settimanale
+
+```{r}
+p <- 1
+k <- h/p
+pred_1w_fer <- c()
+```
+
+
+```{r}
+for(i in k:1){
+  pred_1w_fer <-c(pred_1w_fer,arma_cv_sett(y_fer[c(((k-i)*p):(length(y_fer)-p*i))],h=p,xreg=xreg_fer[c(((k-i)*p):(nrow(xreg_fer)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+```{r}
+metrics <- c(rmse(y_test_fer,pred_1w_fer),mae(y_test_fer,pred_1w_fer),MAPE(pred_1w_fer,y_test_fer)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+# Trimestrale
+
+```{r}
+p <- 14
+k <- h/p
+pred_14w_fer <- c()
+```
+
+
+
+
+```{r}
+for(i in k:1){
+  pred_14w_fer <-c(pred_14w_fer,arma_cv_sett(y_fer[c(((k-i)*p):(length(y_fer)-p*i))],h=p,xreg=xreg_fer[c(((k-i)*p):(nrow(xreg_fer)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+
+
+```{r}
+metrics <- c(rmse(y_test_fer,pred_14w_fer),mae(y_test_fer,pred_14w_fer),MAPE(pred_14w_fer,y_test_fer)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+
+
+
+# Cross-validation Festivi
+
+## Mensile
+
+```{r}
+p <- 4
+k <- h/p
+
+pred_4w_fest <- c()
+
+y_fest <- ts(fest_post_g$lordo3)
+
+xreg_fest <- cbind(fest_post_g$HI, 
+              fest_post_g$giallo,
+              fest_post_g$arancione,
+              fest_post_g$rosso,
+              fest_post_g$temporale)
+```
+
+
+
+```{r}
+
+for(i in k:1){
+  pred_4w_fest <-c(pred_4w_fest,arma_cv_sett(y_fest[c(((k-i)*p):(length(y_fest)-p*i))],h=p,xreg=xreg_fest[c(((k-i)*p):(nrow(xreg_fest)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+```{r}
+metrics <- c(rmse(y_test_fest,pred_4w_fest),mae(y_test_fest,pred_4w_fest),MAPE(pred_4w_fest,y_test_fest)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+## Settimanale
+
+```{r}
+p <- 1
+k <- h/p
+pred_1w_fest <- c()
+```
+
+
+```{r}
+for(i in k:1){
+  pred_1w_fest <-c(pred_1w_fest,arma_cv_sett(y_fest[c(((k-i)*p):(length(y_fest)-p*i))],h=p,xreg=xreg_fest[c(((k-i)*p):(nrow(xreg_fest)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+```{r}
+metrics <- c(rmse(y_test_fest,pred_1w_fest),mae(y_test_fest,pred_1w_fest),MAPE(pred_1w_fest,y_test_fest)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+## Trimestrale
+
+```{r}
+p <- 14
+k <- h/p
+pred_14w_fest <- c()
+```
+
+
+```{r}
+for(i in k:1){
+  pred_14w_fest <-c(pred_14w_fest,arma_cv_sett(y_fest[c(((k-i)*p):(length(y_fest)-p*i))],h=p,xreg=xreg_fest[c(((k-i)*p):(nrow(xreg_fest)-(p*i)+p)),])$mean)
+}
+
+```
+
+
+
+```{r}
+metrics <- c(rmse(y_test_fest,pred_14w_fest),mae(y_test_fest,pred_14w_fest),MAPE(pred_14w_fest,y_test_fest)*100)
+names(metrics) <- c("RMSE","MAE","MAPE")
+metrics
+```
+
+# Mixture models per i giorni festivi
+
+```{r}
+library(flexCWM)
+```
+
+
+```{r}
+data_post_train2 <- data_post_train
+data_post_train2[is.na(data_post_train2)] <- 0
+
+cwm1 <- cwm(lordo3 ~ HI + pioggia + neve + nebbia + temporale + colore + holiday,
+              data=data_post_train2,
+              initialization="kmeans",
+              k=1:5)
+```
+
+
+```{r}
+summary(cwm1, criterion = "AICu", concomitant = TRUE)
+```
+
+```{r}
+data_post_train2$cluster <- getCluster(cwm1,criterion="AICu")
+```
+
+```{r}
+library(plotly)
+ 
+fig <- plot_ly(x = ~data_post_train2$giorno, y = ~data_post_train2$colore, z = ~data_post_train2$lordo3,
+               color=as.character(data_post_train2$cluster))
+
+#fig <- fig %>% add_surface()
+
+fig
+```
+
+
+```{r}
+par(mfrow=c(2,2))
+
+plot(data_post_train2[data_post_train2$colore=="bianco",]$giorno, data_post_train2[data_post_train2$colore=="bianco",]$lordo3, col=data_post_train2[data_post_train2$colore=="bianco",]$cluster, xlab="Giorno della settimana (bianco)", ylab="lordo totale")
+
+plot(data_post_train2[data_post_train2$colore=="giallo",]$giorno, data_post_train2[data_post_train2$colore=="giallo",]$lordo3, col=data_post_train2[data_post_train2$colore=="giallo",]$cluster, xlab="Giorno della settimana (giallo)", ylab="lordo totale")
+
+plot(data_post_train2[data_post_train2$colore=="arancione",]$giorno, data_post_train2[data_post_train2$colore=="arancione",]$lordo3, col=data_post_train2[data_post_train2$colore=="arancione",]$cluster, xlab="Giorno della settimana (arancione)", ylab="lordo totale")
+
+plot(data_post_train2[data_post_train2$colore=="rosso",]$giorno, data_post_train2[data_post_train2$colore=="rosso",]$lordo3, col=data_post_train2[data_post_train2$colore=="rosso",]$cluster, xlab="Giorno della settimana (rosso)", ylab="lordo totale")
+```
+
+
+
+
